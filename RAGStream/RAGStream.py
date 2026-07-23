@@ -631,6 +631,9 @@ Reformulated query:
 
                 user_prompt = f'Based on the following context from cybersecurity standards documents, please answer the question.\nIf the answer cannot be derived from the context, say "I cannot answer this based on the available documents." \n\nContext:\n{context}\n\nQuestion: {contextualized_query}\n\nAnswer:\n'
 
+                with st.expander(f"📄 View Retrieved Context (For Debugging)", expanded=False):
+                    st.write(context)
+
                 return self.generate_answer(system_prompt, user_prompt)
 
         except Exception as e:
