@@ -217,9 +217,17 @@ class ConvoRAG:
                     return "No relevant documents found.", 0.0
                     
                 result = "\n".join([self.documents[i] for i in sorted_indices])
-                # Return the best vector score for the threshold check if available, else a synthetic score
-                best_score = vector_scores[0] if vector_scores else 0.5 
-                st.write("Hybrid search results generated.")
+                
+                # Determine best score for thresholding. 
+                # If Vector Search failed but BM25 keyword search found a strong match, we boost the score.
+                best_vector = vector_scores[0] if vector_scores else 0.0
+                max_bm25 = max(bm25_scores) if len(bm25_scores) > 0 else 0.0
+                
+                best_score = best_vector
+                if max_bm25 > 1.0:  # A solid keyword match was found
+                    best_score = max(best_score, 0.5)
+                    
+                st.write(f"Hybrid search results generated. Vector score: {best_vector:.4f}, Max BM25: {max_bm25:.4f}")
                 return result, best_score
                 
             else:
