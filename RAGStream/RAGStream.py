@@ -106,7 +106,12 @@ class ConvoRAG:
                             st.error(f"Error embedding chunk {i}: {str(e)}")
                             
                 # Initialize BM25 for Keyword Search
-                tokenized_corpus = [doc.lower().split() for doc in self.documents]
+                # We use regex to strip out punctuation like parentheses so (PR.DS) matches pr.ds
+                def tokenize(text):
+                    return re.findall(r'[a-z0-9.-]+', text.lower())
+                self.tokenize = tokenize
+                
+                tokenized_corpus = [self.tokenize(doc) for doc in self.documents]
                 self.bm25 = BM25Okapi(tokenized_corpus)
                 st.write("Hybrid Search (BM25 + Vector) ready.")
                 
@@ -191,7 +196,7 @@ class ConvoRAG:
                 vector_scores = [1.0 - d for d in vector_results["distances"][0]] if vector_results["distances"] else []
                 
                 # 2. Keyword Search (BM25)
-                tokenized_query = query.lower().split()
+                tokenized_query = self.tokenize(query)
                 bm25_scores = self.bm25.get_scores(tokenized_query)
                 bm25_indices = self.topk(bm25_scores.tolist(), top_k)
                 
