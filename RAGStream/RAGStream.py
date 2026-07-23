@@ -19,6 +19,29 @@ try:
 except ImportError:
     ADVANCED_MODE = False
 
+
+def extract_identifier_terms(text: str) -> List[str]:
+    """Return dotted cybersecurity identifiers such as PR.DS or GV.RM."""
+    return sorted(set(re.findall(r'\b[a-z]{2}(?:\.[a-z0-9]{2,4})+\b', text.lower())))
+
+
+def acronym_boost(query: str, document: str) -> float:
+    """Boost documents that contain exact identifier-style matches from the query."""
+    query_terms = extract_identifier_terms(query)
+    if not query_terms:
+        return 0.0
+
+    document_lower = document.lower()
+    document_compact = re.sub(r'[^a-z0-9]+', '', document_lower)
+
+    boost = 0.0
+    for term in query_terms:
+        term_compact = re.sub(r'[^a-z0-9]+', '', term)
+        if term in document_lower or term_compact in document_compact:
+            boost += 0.8
+
+    return min(boost, 1.0)
+
 # ── Default built-in content (used if no docs folder documents are found) ──────
 # This is a compact summary of NIST CSF 2.0 key concepts.
 # It ensures the system is never empty even before you place a PDF in docs/.
@@ -199,6 +222,7 @@ class ConvoRAG:
             if self.advanced_mode:
                 # --- HYBRID SEARCH (ChromaDB Vector + BM25 Keyword) ---
                 query_embedding = self.embed_text(query)
+                keyword_boosts = [acronym_boost(query, doc) for doc in self.documents]
                 
                 # 1. Vector Search
                 vector_results = self.collection.query(
@@ -225,6 +249,10 @@ class ConvoRAG:
                     
                 for rank, idx in enumerate(bm25_indices):
                     combined_scores[idx] = combined_scores.get(idx, 0.0) + (1.0 / (k_rrf + rank + 1))
+
+                for idx, boost in enumerate(keyword_boosts):
+                    if boost > 0:
+                        combined_scores[idx] = combined_scores.get(idx, 0.0) + boost
                 
                 # Sort combined results
                 sorted_indices = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)[:top_k]
@@ -238,11 +266,12 @@ class ConvoRAG:
                 # If Vector Search failed but BM25 keyword search found a strong match, we boost the score.
                 best_vector = vector_scores[0] if vector_scores else 0.0
                 max_bm25 = max(bm25_scores) if len(bm25_scores) > 0 else 0.0
+                best_keyword = max(keyword_boosts) if keyword_boosts else 0.0
                 
                 # Normalize BM25 score proportionally (avoid division by zero)
                 bm25_norm = float(max_bm25) / max(float(max_bm25), 1.0) if max_bm25 > 0 else 0.0
                 
-                best_score = best_vector
+                best_score = max(best_vector, best_keyword)
                 if bm25_norm > 0.3:  # BM25 found at least a moderate keyword match
                     best_score = max(best_score, 0.55)
                     
@@ -257,20 +286,22 @@ class ConvoRAG:
                 query_embedding = self.embed_text(query)
 
                 similarities = []
-                for doc_embedding in self.document_embeddings:
+                boosted_scores = []
+                for idx, doc_embedding in enumerate(self.document_embeddings):
                     similarity = self.cosine_similarity(query_embedding, doc_embedding)
                     similarities.append(similarity)
+                    boosted_scores.append(min(1.0, similarity + acronym_boost(query, self.documents[idx])))
 
-                if not similarities:
+                if not boosted_scores:
                     return "No similarities found.", 0.0
 
-                topk_indices = self.topk(similarities, top_k)
+                topk_indices = self.topk(boosted_scores, top_k)
 
                 if not topk_indices:
                     return "No relevant documents found.", 0.0
 
                 result = "\n".join([self.documents[i] for i in topk_indices])
-                return result, similarities[topk_indices[0]] if topk_indices else 0.0
+                return result, boosted_scores[topk_indices[0]] if topk_indices else 0.0
                 
         except Exception as e:
             st.error(f"Error in document search: {str(e)}")

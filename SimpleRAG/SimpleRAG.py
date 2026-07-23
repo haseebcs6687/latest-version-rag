@@ -1,6 +1,30 @@
 import heapq
 import numpy as np
 import ollama
+import re
+
+
+def extract_identifier_terms(text: str):
+    """Return dotted cybersecurity identifiers such as PR.DS or GV.RM."""
+    return sorted(set(re.findall(r'\b[a-z]{2}(?:\.[a-z0-9]{2,4})+\b', text.lower())))
+
+
+def acronym_boost(query: str, document: str) -> float:
+    """Boost documents that contain exact identifier-style matches from the query."""
+    query_terms = extract_identifier_terms(query)
+    if not query_terms:
+        return 0.0
+
+    document_lower = document.lower()
+    document_compact = re.sub(r'[^a-z0-9]+', '', document_lower)
+
+    boost = 0.0
+    for term in query_terms:
+        term_compact = re.sub(r'[^a-z0-9]+', '', term)
+        if term in document_lower or term_compact in document_compact:
+            boost += 0.8
+
+    return min(boost, 1.0)
 
 
 def embed_text(text: str, embedding_model="nomic-embed-text"):
@@ -31,14 +55,16 @@ def search(query, documents, document_embeddings, top_k=5):
     query_embedding = embed_text(query)
 
     similarities = []
-    for doc_embedding in document_embeddings:
+    boosted_scores = []
+    for idx, doc_embedding in enumerate(document_embeddings):
         similarity = cosine_similarity(query_embedding, doc_embedding)
         similarities.append(similarity)
+        boosted_scores.append(min(1.0, similarity + acronym_boost(query, documents[idx])))
 
-    topk_indices = topk(similarities, top_k)
+    topk_indices = topk(boosted_scores, top_k)
 
     result = '\n'.join([documents[i] for i in topk_indices])
-    return result, similarities[topk_indices[0]]
+    return result, boosted_scores[topk_indices[0]]
 
 
 def generate_answer(system_prompt, user_prompt, model='llama3.2'):
@@ -55,7 +81,7 @@ def generate_answer(system_prompt, user_prompt, model='llama3.2'):
 
 def rag(query):
     """Main function to perform document search and answer generation."""
-    context, similarity = search(query, documents, document_embeddings)
+    context, _ = search(query, documents, document_embeddings)
     print(f'Retrieved context: \n {context}')
 
     system_prompt = '''You are an expert AI assistant specializing in cybersecurity standards and frameworks. You have access to detailed information from cybersecurity standards documents such as the NIST Cybersecurity Framework (CSF) 2.0.
