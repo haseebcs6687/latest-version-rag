@@ -23,6 +23,8 @@ class ConvoRAG:
         dot_product = np.dot(embedding1, embedding2)
         norm1 = np.linalg.norm(embedding1)
         norm2 = np.linalg.norm(embedding2)
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
         return dot_product / (norm1 * norm2)
 
     def topk(self, arr: List[float], k: int) -> List[int]:
@@ -44,14 +46,18 @@ class ConvoRAG:
         result = '\n'.join([self.documents[i] for i in topk_indices])
         return result, similarities[topk_indices[0]]
 
-    def generate_answer(self, system_prompt: str, user_prompt: str) -> str:
+    def generate_answer(self, system_prompt: str, user_prompt: str, inject_history: bool = False) -> str:
         """Generate a response using the provided system and user prompts."""
+        messages = [{'role': 'system', 'content': system_prompt}]
+        if inject_history and self.conversation_history:
+            for (q, a) in self.conversation_history[-3:]:  # last 3 turns only
+                messages.append({'role': 'user', 'content': q})
+                messages.append({'role': 'assistant', 'content': a})
+        messages.append({'role': 'user', 'content': user_prompt})
+
         response = ollama.chat(
             model=self.llm_model,
-            messages=[
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_prompt}
-            ]
+            messages=messages
         )
         return response['message']['content']
 
@@ -117,16 +123,21 @@ class ConvoRAG:
 
         response = self.generate_answer(system_prompt, user_prompt).lower().strip()
 
-        if "cybersecurity" in response:
+        # Check for exact category name first, then fallback keywords
+        if "cybersecurity-related" in response:
             return "cybersecurity-related"
+        elif "off-topic" in response or "offtopic" in response:
+            return "off-topic"
         elif "compliment" in response:
             return "compliment"
         elif "complaint" in response:
             return "complaint"
         elif "chitchat" in response:
             return "chitchat"
+        elif "cybersecurity" in response:
+            return "cybersecurity-related"
         else:
-            return "off-topic"
+            return "cybersecurity-related"  # safe default
 
     def contextualize_query(self, current_query: str) -> str:
         """Enhance the current query with context from conversation history."""
@@ -256,7 +267,7 @@ class ConvoRAG:
 
         user_prompt = f"Based on the following context from cybersecurity standards documents, please answer the question.\nIf the answer cannot be derived from the context, say \"I cannot answer this based on the available documents.\" \n\nContext:\n{context}\n\nQuestion: {contextualized_query}\n\nAnswer:\n"
 
-        answer = self.generate_answer(system_prompt, user_prompt)
+        answer = self.generate_answer(system_prompt, user_prompt, inject_history=True)
 
         self.conversation_history.append((query, answer))
 

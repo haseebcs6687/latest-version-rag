@@ -86,11 +86,27 @@ class ConvoRAG:
                 
                 # Check if we need to add these documents
                 existing_count = self.collection.count()
-                st.write(f"Found {existing_count} existing chunks in the database.")
+                existing_meta = self.collection.metadata or {}
+                stored_hash = existing_meta.get("doc_hash", "")
                 
-                # For simplicity in this demo, if the count is different or 0, we rebuild
-                if existing_count == 0 or existing_count != len(self.documents):
+                st.write(f"Found {existing_count} existing chunks in the database.")
+                st.write(f"Stored hash: {stored_hash} | Current hash: {doc_hash}")
+                
+                needs_rebuild = (existing_count == 0 or existing_count != len(self.documents) or stored_hash != doc_hash)
+                
+                if needs_rebuild:
                     st.write("Generating and storing new embeddings in the database...")
+                    # Recreate collection to wipe old contents
+                    try:
+                        self.chroma_client.delete_collection(name="cyber_standards")
+                    except Exception:
+                        pass
+                    
+                    self.collection = self.chroma_client.create_collection(
+                        name="cyber_standards",
+                        metadata={"hnsw:space": "cosine", "doc_hash": doc_hash}
+                    )
+                    
                     # Generate embeddings
                     for i, doc in enumerate(documents):
                         try:
@@ -223,11 +239,14 @@ class ConvoRAG:
                 best_vector = vector_scores[0] if vector_scores else 0.0
                 max_bm25 = max(bm25_scores) if len(bm25_scores) > 0 else 0.0
                 
+                # Normalize BM25 score proportionally (avoid division by zero)
+                bm25_norm = float(max_bm25) / max(float(max_bm25), 1.0) if max_bm25 > 0 else 0.0
+                
                 best_score = best_vector
-                if max_bm25 > 1.0:  # A solid keyword match was found
-                    best_score = max(best_score, 0.5)
+                if bm25_norm > 0.3:  # BM25 found at least a moderate keyword match
+                    best_score = max(best_score, 0.55)
                     
-                st.write(f"Hybrid search results generated. Vector score: {best_vector:.4f}, Max BM25: {max_bm25:.4f}")
+                st.write(f"Hybrid search results. Vector: {best_vector:.4f}, Max BM25: {max_bm25:.4f}, Normalized BM25: {bm25_norm:.4f}, Final score: {best_score:.4f}")
                 return result, best_score
                 
             else:
@@ -258,19 +277,25 @@ class ConvoRAG:
             return "Error occurred while searching documents.", 0.0
 
     def generate_answer(
-        self, system_prompt: str, user_prompt: str, is_stream: bool = True
+        self, system_prompt: str, user_prompt: str, is_stream: bool = True,
+        inject_history: bool = False
     ) -> Any:
         """Generate a response using the provided system and user prompts."""
         try:
             st.write(f"Generating response with model: {self.llm_model}")
 
             generation_start = time.time()
+            
+            messages = [{"role": "system", "content": system_prompt}]
+            if inject_history and self.conversation_history:
+                for (q, a) in self.conversation_history[-3:]:  # last 3 turns only
+                    messages.append({"role": "user", "content": q})
+                    messages.append({"role": "assistant", "content": a})
+            messages.append({"role": "user", "content": user_prompt})
+
             response = ollama.chat(
                 model=self.llm_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=messages,
                 stream=is_stream,
             )
 
@@ -358,16 +383,21 @@ class ConvoRAG:
                 .strip()
             )
 
-            if "cybersecurity" in initial_classification:
+            # Check for exact category name first, then fallback keywords
+            if "cybersecurity-related" in initial_classification:
                 classification = "cybersecurity-related"
+            elif "off-topic" in initial_classification or "offtopic" in initial_classification:
+                classification = "off-topic"
             elif "compliment" in initial_classification:
                 classification = "compliment"
             elif "complaint" in initial_classification:
                 classification = "complaint"
             elif "chitchat" in initial_classification:
                 classification = "chitchat"
+            elif "cybersecurity" in initial_classification:
+                classification = "cybersecurity-related"
             else:
-                classification = "off-topic"
+                classification = "cybersecurity-related"  # safe default
 
             st.write(f"Initial classification: '{classification}'")
 
@@ -586,7 +616,7 @@ Reformulated query:
                 context, relevance_score = self.search(contextualized_query)
                 st.write(f"Top relevance score: {relevance_score:.4f}")
 
-                if relevance_score < 0.35 and context != "No documents available.":
+                if relevance_score < 0.45 and context != "No documents available.":
                     st.write(
                         f"Low relevance score ({relevance_score:.4f}), using fallback response"
                     )
@@ -634,7 +664,7 @@ Reformulated query:
                 with st.expander(f"📄 View Retrieved Context (For Debugging)", expanded=False):
                     st.write(context)
 
-                return self.generate_answer(system_prompt, user_prompt)
+                return self.generate_answer(system_prompt, user_prompt, inject_history=True)
 
         except Exception as e:
             error_msg = f"I apologize, but I encountered an error while processing your question. Please try asking again or consult your cybersecurity administrator for assistance."
@@ -674,7 +704,9 @@ def chunk_text_with_overlap(
         i += words_per_chunk - overlap_words
 
         if i + words_per_chunk > len(words) and i < len(words):
-            chunks.append(" ".join(words[i:]))
+            remaining = len(words) - i
+            if remaining > overlap_words:
+                chunks.append(" ".join(words[i:]))
             break
 
     improved_chunks = []
@@ -896,7 +928,7 @@ def main():
                 st.write("Merged uploaded document with existing content.")
 
             documents = chunk_text_with_overlap(
-                text=document_text, chunk_size=450, overlap_size=100
+                text=document_text, chunk_size=200, overlap_size=40
             )
             st.session_state.documents = documents
             st.session_state.document_text = document_text
